@@ -1,0 +1,140 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package selfformat
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pkg/errors"
+
+	"github.com/elastic/beats/libbeat/beat"
+	"github.com/elastic/beats/libbeat/common"
+	"github.com/elastic/beats/libbeat/logp"
+	"github.com/elastic/beats/libbeat/processors"
+	jsprocessor "github.com/elastic/beats/libbeat/processors/script/javascript/module/processor"
+)
+
+const logName = "processor.selfformat"
+
+func init() {
+	processors.RegisterPlugin("selfformat", New)
+	jsprocessor.RegisterPlugin("Selfformat", New)
+}
+
+const (
+	FormatAPI   = "api"
+	FormatNginx = "nginx"
+)
+
+type processor struct {
+	config
+	log *logp.Logger
+}
+
+// New constructs a new convert processor.
+func New(cfg *common.Config) (processors.Processor, error) {
+	c := defaultConfig()
+	if err := cfg.Unpack(&c); err != nil {
+		return nil, errors.Wrap(err, "fail to unpack the convert processor configuration")
+	}
+
+	return newConvert(c)
+}
+
+func newConvert(c config) (*processor, error) {
+	log := logp.NewLogger(logName)
+	if c.Tag != "" {
+		log = log.With("instance_id", c.Tag)
+	}
+
+	return &processor{config: c, log: log}, nil
+}
+
+func (p *processor) String() string {
+	json, _ := json.Marshal(p.config)
+	return "convert=" + string(json)
+}
+
+func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
+	tags, err := event.Fields.GetValue("tags")
+	if err != nil {
+		return event, nil
+	}
+	tagList, ok := tags.([]string)
+	if !ok {
+		return event, nil
+	}
+	var tag string
+	for _, t := range tagList {
+		switch t {
+		case FormatAPI, FormatNginx:
+			tag = t
+			break
+		}
+	}
+	if tag == FormatAPI {
+		msgSrc, _ := event.Fields.GetValue("message")
+		msg, _ := msgSrc.(string)
+		header, logTag, vv := formatAPI(msg)
+		event.Fields.Put("log_tag", logTag)
+		for k, v := range vv {
+			event.Fields.Put(k, v)
+		}
+		if len(vv) > 0 {
+			event.Fields.Delete("message")
+		}
+		if header != "" {
+			lindex := strings.Index(header, "]")
+			if lindex < len(header) && lindex > 0 {
+				tinfo := header[1:lindex]
+				header = header[lindex+1:]
+				lindex = strings.LastIndex(tinfo, " ")
+				ms, _ := strconv.ParseInt(tinfo[lindex:], 10, 64)
+				t, err := time.ParseInLocation("2006/01/02 15:04:05", tinfo[:lindex], time.Local)
+				if err != nil {
+					return event, nil
+				}
+				t.Add(time.Duration(ms) * time.Millisecond)
+				event.Timestamp = t
+			}
+		}
+		event.Fields.Put("header", header)
+	}
+	return event, nil
+}
+
+func formatAPI(msg string) (header string, logTag string, data map[string]string) {
+	index := strings.Index(msg, "] ")
+	data = make(map[string]string)
+	if index > 0 && index < len(msg) {
+		header = msg[:index]
+		index1 := strings.Index(msg, "||")
+		logTag = msg[index+2 : index1]
+		ks := strings.Split(msg[index1+2:], "||")
+		for _, kk := range ks {
+			sec := strings.Split(kk, "=")
+			if len(sec) == 2 {
+				data[sec[0]] = sec[1]
+			}
+		}
+	}
+	return
+}
