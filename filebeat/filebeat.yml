@@ -59,6 +59,14 @@ filebeat.inputs:
   tags: ["api"]
   idle_timeout: 2
 
+- type: log
+  enabled: true
+  tail_files: true
+  paths:
+      - /Users/dongchen/tmp/localhost_access.txt
+  tags: ["tomcat"]
+  idle_timeout: 2
+
 #============================= Filebeat modules ===============================
 
 filebeat.config.modules:
@@ -139,13 +147,17 @@ setup.kibana:
 #================================ Outputs =====================================
 
 # Configure what output to use when sending the data collected by the beat.
+output.kafka:
+    enabled: true
+    hosts: ["127.0.0.1:9092"]
+    topic: "self-log"
 
 #-------------------------- Elasticsearch output ------------------------------
-setup.template.name: "web"
-setup.template.pattern: "web-*"
-output.elasticsearch:
-   hosts: ["localhost:9200"]
-   index: "web-%{+yyyy.MM.dd}"
+#setup.template.name: "web"
+#setup.template.pattern: "web-*"
+#output.elasticsearch:
+#   hosts: ["localhost:9200"]
+#   index: "web-%{+yyyy.MM.dd}"
 
   # Optional protocol and basic auth credentials.
   #protocol: "https"

@@ -19,6 +19,8 @@ package selfformat
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,8 +42,11 @@ func init() {
 }
 
 const (
-	FormatAPI   = "api"
-	FormatNginx = "nginx"
+	FormatAPI         = "api"
+	FormatNginx       = "nginx"
+	FormatTomcat      = "tomcat"
+	FormatJavaOld     = "java_old"
+	FormatFrontFedOld = "fed_old_log"
 )
 
 type processor struct {
@@ -85,14 +90,16 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 	var tag string
 	for _, t := range tagList {
 		switch t {
-		case FormatAPI, FormatNginx:
+		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld:
 			tag = t
 			break
 		}
 	}
-	if tag == FormatAPI {
-		msgSrc, _ := event.Fields.GetValue("message")
-		msg, _ := msgSrc.(string)
+	msgSrc, _ := event.Fields.GetValue("message")
+	msg, _ := msgSrc.(string)
+	switch tag {
+	case FormatAPI:
+		event.Fields.Put("tag", tag)
 		header, logTag, vv := formatAPI(msg)
 		event.Fields.Put("log_tag", logTag)
 		for k, v := range vv {
@@ -117,6 +124,41 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 			}
 		}
 		event.Fields.Put("header", header)
+	case FormatJavaOld:
+		event.Fields.Put("tag", tag)
+		level, t := formatJavaOld(msg)
+		event.Timestamp = t
+		event.Fields.Put("level", level)
+	case FormatNginx:
+		event.Fields.Put("tag", tag)
+		t, vv := formatNginx(msg)
+		for k, v := range vv {
+			event.Fields.Put(k, v)
+		}
+		if len(vv) > 0 {
+			event.Fields.Delete("message")
+			event.Timestamp = t
+		}
+	case FormatTomcat:
+		event.Fields.Put("tag", tag)
+		t, vv := formatTomcat(msg)
+		for k, v := range vv {
+			event.Fields.Put(k, v)
+		}
+		if len(vv) > 0 {
+			event.Fields.Delete("message")
+			event.Timestamp = t
+		}
+	case FormatFrontFedOld:
+		event.Fields.Put("tag", tag)
+		ext, t := formatFrontFedOld(msg)
+		for k, v := range ext {
+			event.Fields.Put(k, v)
+		}
+		if len(ext) > 0 {
+			event.Fields.Delete("message")
+		}
+		event.Timestamp = t
 	}
 	return event, nil
 }
@@ -137,4 +179,89 @@ func formatAPI(msg string) (header string, logTag string, data map[string]string
 		}
 	}
 	return
+}
+
+func formatNginx(msg string) (ts time.Time, data map[string]string) {
+	data = make(map[string]string)
+	msg = strings.ReplaceAll(msg, "  ", " ")
+	ss := strings.SplitN(msg, " ", -1)
+	if len(ss) <= 10 {
+		return time.Now(), data
+	}
+	data["client_ip"] = ss[0]
+	ts, _ = time.ParseInLocation("02/Jan/2006:15:04:05", ss[3][1:], time.Local)
+	data["timestamp"] = fmt.Sprint(ts.Unix())
+	u, _ := url.Parse(ss[6])
+	data["url"] = u.Path
+	data["http_status"] = ss[8]
+	//data["elapsed"] = ss[10]
+	return ts, data
+}
+
+func formatTomcat(msg string) (ts time.Time, data map[string]string) {
+	data = make(map[string]string)
+	msg = strings.ReplaceAll(msg, "  ", " ")
+	ss := strings.SplitN(msg, " ", -1)
+	if len(ss) <= 10 {
+		return time.Now(), data
+	}
+	data["client_ip"] = ss[0]
+	var err error
+	ts, err = time.ParseInLocation("02/Jan/2006:15:04:05", ss[3][1:], time.Local)
+	if err != nil {
+		println(ss[3][1:], err.Error())
+	}
+	data["timestamp"] = fmt.Sprint(ts.Unix())
+	u, _ := url.Parse(ss[6])
+	data["url"] = u.Path
+	data["http_status"] = ss[8]
+	data["elapsed"] = ss[10]
+	return ts, data
+}
+
+func formatJavaOld(msg string) (level string, ts time.Time) {
+	msg = strings.ReplaceAll(msg, "  ", " ")
+	ss := strings.SplitN(msg, " ", -1)
+	level = ss[0]
+	if len(ss) <= 4 {
+		return "INFO", time.Now()
+	}
+	var err error
+	ts, err = time.ParseInLocation("2006-01-02 15:04:05", ss[3][1:]+" "+ss[4][:len(ss[4])-5], time.Local)
+	if err != nil {
+		println(ss[3][1:], err.Error())
+	}
+	return level, ts
+}
+
+func formatFrontFedOld(msg string) (kv map[string]interface{}, ts time.Time) {
+	msg = strings.ReplaceAll(msg, "  ", " ")
+	ss := strings.SplitN(msg, " ", -1)
+	if len(ss) <= 6 {
+		return nil, time.Now()
+	}
+	var err error
+	ts, err = time.Parse("02/Jan/2006:15:04:05", ss[3][1:])
+	if err != nil {
+		println(ss[3][1:], err.Error())
+	}
+	req, err := url.ParseRequestURI(ss[6])
+	params := req.Query()
+	ext := params.Get("extparams")
+	extParams := make(map[string]interface{})
+	err = json.Unmarshal([]byte(ext), &extParams)
+	for k := range params {
+		if k == "extparams" {
+			continue
+		}
+		v := params.Get(k)
+		extParams[k] = v
+	}
+	if len(ss) > 10 {
+		extParams["Refer"] = ss[10]
+	}
+	if len(ss) > 11 {
+		extParams["UA"] = strings.Join(ss[11:len(ss)-1], " ")
+	}
+	return extParams, ts
 }
