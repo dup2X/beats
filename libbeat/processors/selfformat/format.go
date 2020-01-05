@@ -47,6 +47,7 @@ const (
 	FormatTomcat      = "tomcat"
 	FormatJavaOld     = "java_old"
 	FormatFrontFedOld = "fed_old_log"
+	FormatPHPLog      = "php_normal"
 )
 
 type processor struct {
@@ -90,13 +91,14 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 	var tag string
 	for _, t := range tagList {
 		switch t {
-		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld:
+		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld, FormatPHPLog:
 			tag = t
 			break
 		}
 	}
 	msgSrc, _ := event.Fields.GetValue("message")
 	msg, _ := msgSrc.(string)
+	//fmt.Printf("---------tag=%s-------\n", tag)
 	switch tag {
 	case FormatAPI:
 		event.Fields.Put("tag", tag)
@@ -157,6 +159,14 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 		}
 		if len(ext) > 0 {
 			event.Fields.Delete("message")
+		}
+		event.Timestamp = t
+	case FormatPHPLog:
+		event.Fields.Put("tag", tag)
+		kv, t := formatPHPNormalLog(msg)
+		event.Fields.Put("kvs", len(kv))
+		for k, v := range kv {
+			event.Fields.Put(k, v)
 		}
 		event.Timestamp = t
 	}
@@ -264,4 +274,30 @@ func formatFrontFedOld(msg string) (kv map[string]interface{}, ts time.Time) {
 		extParams["UA"] = strings.Join(ss[11:len(ss)-1], " ")
 	}
 	return extParams, ts
+}
+
+func formatPHPNormalLog(msg string) (map[string]interface{}, time.Time) {
+	ret := make(map[string]interface{})
+	var err error
+	ts, err := time.ParseInLocation("2006-01-02 15:04:05", msg[1:20], time.Local)
+	if err != nil {
+		println(msg[1:20], err.Error())
+		return ret, time.Now()
+	}
+	headerLen := strings.Index(msg, "||")
+	tagStart := strings.LastIndex(msg[:headerLen], "]")
+	ltag := msg[tagStart+1 : headerLen]
+	ret["ltag"] = ltag
+	items := strings.Split(msg, "||")
+	for i := range items {
+		kv := strings.Split(items[i], "=")
+		if kv != nil && len(kv) == 2 {
+			if kv[1] == "" || kv[0] == "" {
+				continue
+			}
+			//	fmt.Printf("%s=%s\n", kv[0], kv[1])
+			ret[kv[0]] = kv[1]
+		}
+	}
+	return ret, ts
 }
