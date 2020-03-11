@@ -47,6 +47,7 @@ const (
 	FormatTomcat      = "tomcat"
 	FormatJavaOld     = "java_old"
 	FormatFrontFedOld = "fed_old_log"
+	FormatFrontFed    = "fed_log"
 	FormatPHPLog      = "php_normal"
 )
 
@@ -91,7 +92,7 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 	var tag string
 	for _, t := range tagList {
 		switch t {
-		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld, FormatPHPLog:
+		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld, FormatPHPLog, FormatFrontFed:
 			tag = t
 			break
 		}
@@ -161,6 +162,19 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 			event.Fields.Delete("message")
 		}
 		event.Timestamp = t
+	case FormatFrontFed:
+		event.Fields.Put("tag", tag)
+		ext, t := formatFedLog(msg)
+		for k, v := range ext {
+			if k != "timestamp" {
+				event.Fields.Put(k, v)
+			}
+		}
+		event.Fields.Put("timestamp", t)
+		//event.Timestamp = t
+		if len(ext) > 0 {
+			event.Fields.Delete("message")
+		}
 	case FormatPHPLog:
 		event.Fields.Put("tag", tag)
 		kv, t := formatPHPNormalLog(msg)
@@ -300,4 +314,41 @@ func formatPHPNormalLog(msg string) (map[string]interface{}, time.Time) {
 		}
 	}
 	return ret, ts
+}
+
+func formatFedLog(msg string) (map[string]interface{}, int64) {
+	ret := make(map[string]interface{})
+	itemsSrc := strings.Split(msg, "||")
+	items := itemsSrc[2:]
+	for i := range items {
+		idx := strings.Index(items[i], "=")
+		if idx < 1 {
+			continue
+		}
+		if idx+1 >= len(items[i]) {
+			continue
+		}
+		var kv = make([]string, 2)
+		kv[0] = items[i][:idx]
+		kv[1] = items[i][idx+1:]
+		//	fmt.Printf("%s=%s\n", kv[0], kv[1])
+		ret[kv[0]] = kv[1]
+	}
+	extra := make(map[string]interface{})
+	input := make(map[string]interface{})
+	json.Unmarshal([]byte(fmt.Sprint(ret["url_params"])), &input)
+	json.Unmarshal([]byte(fmt.Sprint(ret["extra"])), &extra)
+	for k, v := range extra {
+		if _, ok := ret[k]; !ok {
+			ret[k] = v
+		}
+	}
+	for k, v := range input {
+		ret["input_"+k] = v
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", fmt.Sprint(ret["timestamp"]), time.Local)
+	if err != nil {
+		fmt.Printf("timestamp==err===%v\n", err)
+	}
+	return ret, t.UnixNano() / 1e6
 }
