@@ -28,6 +28,7 @@ type config struct {
 	URL   string       `config:"url"`
 	Codec codec.Config `config:"codec"`
 	Token string       `json:"token"`
+	Topic string       `json:"topic"`
 }
 
 var (

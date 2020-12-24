@@ -22,5 +22,6 @@ func defaultConfig() config {
 }
 
 type config struct {
-	Tag string `config:"tag"` // Processor ID for debug and metrics.
+	Tag        string   `config:"tag"` // Processor ID for debug and metrics.
+	FormatKeys []string `json:"format_keys"`
 }

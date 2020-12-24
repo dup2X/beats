@@ -18,9 +18,11 @@
 package selfformat
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -49,11 +51,14 @@ const (
 	FormatFrontFedOld = "fed_old_log"
 	FormatFrontFed    = "fed_log"
 	FormatPHPLog      = "php_normal"
+	FormatAPIV2       = "api_v2"
+	FormatEventB      = "event_b"
 )
 
 type processor struct {
 	config
-	log *logp.Logger
+	log  *logp.Logger
+	keys map[string]bool
 }
 
 // New constructs a new convert processor.
@@ -71,7 +76,6 @@ func newConvert(c config) (*processor, error) {
 	if c.Tag != "" {
 		log = log.With("instance_id", c.Tag)
 	}
-
 	return &processor{config: c, log: log}, nil
 }
 
@@ -92,14 +96,13 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 	var tag string
 	for _, t := range tagList {
 		switch t {
-		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld, FormatPHPLog, FormatFrontFed:
+		case FormatAPI, FormatNginx, FormatTomcat, FormatFrontFedOld, FormatPHPLog, FormatFrontFed, FormatAPIV2, FormatEventB:
 			tag = t
 			break
 		}
 	}
 	msgSrc, _ := event.Fields.GetValue("message")
 	msg, _ := msgSrc.(string)
-	//fmt.Printf("---------tag=%s-------\n", tag)
 	switch tag {
 	case FormatAPI:
 		event.Fields.Put("tag", tag)
@@ -171,6 +174,8 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 			}
 		}
 		event.Fields.Put("timestamp", t)
+		event.Fields.Put("row_timestamp", t)
+		event.Fields.Put("row_uuid", fmt.Sprintf("%x", md5.Sum([]byte(msg))))
 		//event.Timestamp = t
 		if len(ext) > 0 {
 			event.Fields.Delete("message")
@@ -179,6 +184,20 @@ func (p *processor) Run(event *beat.Event) (*beat.Event, error) {
 		event.Fields.Put("tag", tag)
 		kv, t := formatPHPNormalLog(msg)
 		event.Fields.Put("kvs", len(kv))
+		for k, v := range kv {
+			event.Fields.Put(k, v)
+		}
+		event.Timestamp = t
+	case FormatAPIV2:
+		event.Fields.Put("tag", tag)
+		kv, t := FormatAPINormalLog(msg)
+		for k, v := range kv {
+			event.Fields.Put(k, v)
+		}
+		event.Timestamp = t
+	case FormatEventB:
+		event.Fields.Put("tag", tag)
+		kv, t := FormatEventBVersion(msg)
 		for k, v := range kv {
 			event.Fields.Put(k, v)
 		}
@@ -309,7 +328,7 @@ func formatPHPNormalLog(msg string) (map[string]interface{}, time.Time) {
 			if kv[1] == "" || kv[0] == "" {
 				continue
 			}
-			//	fmt.Printf("%s=%s\n", kv[0], kv[1])
+			fmt.Printf("%s=%s\n", kv[0], kv[1])
 			ret[kv[0]] = kv[1]
 		}
 	}
@@ -319,6 +338,9 @@ func formatPHPNormalLog(msg string) (map[string]interface{}, time.Time) {
 func formatFedLog(msg string) (map[string]interface{}, int64) {
 	ret := make(map[string]interface{})
 	itemsSrc := strings.Split(msg, "||")
+	if len(itemsSrc) < 2 {
+		return ret, 0
+	}
 	items := itemsSrc[2:]
 	for i := range items {
 		idx := strings.Index(items[i], "=")
@@ -326,7 +348,7 @@ func formatFedLog(msg string) (map[string]interface{}, int64) {
 			continue
 		}
 		if idx+1 >= len(items[i]) {
-			continue
+			//	continue
 		}
 		var kv = make([]string, 2)
 		kv[0] = items[i][:idx]
@@ -346,9 +368,65 @@ func formatFedLog(msg string) (map[string]interface{}, int64) {
 	for k, v := range input {
 		ret["input_"+k] = v
 	}
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", fmt.Sprint(ret["timestamp"]), time.Local)
-	if err != nil {
-		fmt.Printf("timestamp==err===%v\n", err)
+	ts := time.Now().UnixNano() / 1e6
+	if _, ok := ret["server_ts_ms"]; ok {
+		var err error
+		ts, err = strconv.ParseInt(fmt.Sprint(ret["server_ts_ms"]), 10, 64)
+		if err != nil {
+			fmt.Printf("timestamp==err===%v\n", err)
+		}
+		delete(ret, "server_ts_ms")
 	}
-	return ret, t.UnixNano() / 1e6
+	return ret, ts
+}
+
+func FormatAPINormalLog(msg string) (map[string]interface{}, time.Time) {
+	ret := make(map[string]interface{})
+	var err error
+	ts, err := time.ParseInLocation("2006-01-02 15:04:05", msg[1:20], time.Local)
+	if err != nil {
+		println(msg[1:20], err.Error())
+		return ret, time.Now()
+	}
+	headerLen := strings.Index(msg, "||")
+	if headerLen < 1 || len(msg) < headerLen+2 {
+		return ret, ts
+	}
+	tagStart := strings.LastIndex(msg[:headerLen], "]")
+	ltag := msg[tagStart+1 : headerLen]
+	ret["ltag"] = strings.TrimSpace(ltag)
+	items := strings.Split(msg, "||")
+	for i := range items {
+		kv := strings.Split(items[i], "=")
+		if kv != nil && len(kv) == 2 {
+			if kv[1] == "" || kv[0] == "" || kv[0] == "host" {
+				continue
+			}
+			ret[kv[0]] = strings.TrimLeft(kv[1], " ")
+		}
+	}
+	return ret, ts
+}
+
+func FormatEventBVersion(msg string) (map[string]interface{}, time.Time) {
+	ret := make(map[string]interface{})
+	var err error
+	m, err := regexp.Compile(`\[(\d{4}-\d{2}-\d{2} \d{2}\:\d{2}\:\d{2})\.\d+\].+merchantNum = (\d+).+({.+})`)
+	if err != nil {
+		println(err.Error())
+		return ret, time.Now()
+	}
+	ss1 := m.FindStringSubmatch(msg)
+	ts, err := time.ParseInLocation("2006-01-02 15:04:05", ss1[1], time.Local)
+	if err != nil {
+		println(ss1[1], err.Error())
+		return ret, time.Now()
+	}
+	err = json.Unmarshal([]byte(ss1[3]), &ret)
+	if err != nil {
+		println(ss1[3], err.Error())
+		return ret, time.Now()
+	}
+	ret["merchant_num"] = ss1[2]
+	return ret, ts
 }

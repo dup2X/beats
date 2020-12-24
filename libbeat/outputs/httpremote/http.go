@@ -19,6 +19,7 @@ package httpremote
 
 import (
 	"bytes"
+	"encoding/base64"
 	"net/http"
 
 	"github.com/elastic/beats/libbeat/beat"
@@ -38,6 +39,7 @@ type httpRemote struct {
 	observer outputs.Observer
 	codec    codec.Codec
 	uri      string
+	topic    string
 }
 
 // makeHTTPRemote instantiates a new file output instance.
@@ -69,6 +71,7 @@ func makeHTTPRemote(
 func (out *httpRemote) init(beat beat.Info, c config) error {
 	var err error
 	out.uri = c.URL
+	out.topic = c.Topic
 	out.codec, err = codec.CreateEncoder(beat, c.Codec)
 	if err != nil {
 		return err
@@ -106,8 +109,13 @@ func (out *httpRemote) Publish(
 			dropped++
 			continue
 		}
+		buf := bytes.NewBuffer([]byte(`{"topic":"`))
+		buf.WriteString(out.topic)
+		buf.WriteString(`","payload":"`)
+		buf.WriteString(base64.StdEncoding.EncodeToString(serializedEvent))
+		buf.WriteString(`"}`)
 
-		req, err := http.NewRequest("POST", out.uri, bytes.NewBuffer(serializedEvent))
+		req, err := http.NewRequest("POST", out.uri, buf)
 		if err != nil {
 			if event.Guaranteed() {
 				logp.Critical("Failed to init the httpRemote request: %v", err)
@@ -119,6 +127,7 @@ func (out *httpRemote) Publish(
 			dropped++
 			continue
 		}
+		req.Header.Set("Content-Type", "application/json")
 		if _, err = cli.Do(req); err != nil {
 			st.WriteError(err)
 
@@ -143,4 +152,9 @@ func (out *httpRemote) Publish(
 
 func (out *httpRemote) String() string {
 	return "httpremote(" + out.uri + ")"
+}
+
+type QueueMessage struct {
+	Topic   string `json:"topic"`
+	Payload string `json:"payload"`
 }
